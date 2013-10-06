@@ -8,13 +8,21 @@ from tweepy.error import TweepError
 import time
 import datetime
 from random import randint
+from optparse import OptionParser
+
+current_database = "tweeter"
+mdb_user = "pontus"
+mdb_pass = "cecilia"
+
+options = 0
 
 #
 # Connects to the database and returns a connection object to the caller
 #
 def database_connect():
     try:
-        lcon = mdb.connect('localhost', 'tweeter', 'Tweeter', 'tweeter')
+        # Currently only local databases are supported
+        lcon = mdb.connect('localhost', mdb_user, mdb_pass, current_database)
         return lcon
     except mdb.Error, e:
         print "An error occured while trying to connect to the database '%d, %s'" % (e.args[0], e.args[1])
@@ -54,7 +62,7 @@ def get_no_tweets():
     con = database_connect()
     try:
         cur = con.cursor()
-        cur.execute("SELECT * FROM tweets")
+        cur.execute("SELECT * FROM tweets WHERE enabled = true")
         count = cur.rowcount
         con.close()
         return count
@@ -66,13 +74,37 @@ def get_no_tweets():
 # Gets the tweet defined by the pos parameter.
 #
 def get_tweet(pos):
+    global options
+
     con = database_connect()
     try:
         cur = con.cursor()
-        cur.execute("SELECT * FROM tweets")
+        cur.execute("SELECT * FROM tweets WHERE enabled = true ORDER BY sort")
         rows = cur.fetchall()
+        # Get iteration counter, increment it and compare with max iterations
+        # Disable tweet if we have reached the maximum number of iterations
+        icntr = rows[pos][3] + 1;
+        enabled = rows[pos][5];
+        if icntr == rows[pos][4]:
+            print "Reached the max number of iterations, disabling this tweet"
+            enabled = 0
+
+        # Update data base entry with new information
+        sqlcmd = "UPDATE tweets SET numIterations='%d', enabled='%d' WHERE tweetID = '%d';" % (icntr, enabled, rows[pos][0])
+
+        print "Executing <%s>" % (sqlcmd)
+        # New cursor for the update operation
+        upd_cur = con.cursor()
+        try:
+            upd_cur.execute(sqlcmd)
+            con.commit()
+        except:
+            print "Error on <%s>" % (sqlcmd)
+
+        # Close connection with database
         con.close()
-        return rows[pos][1]
+
+        return rows[pos][2]
     except mdb.Error, e:
         print "An error occured while trying to get a tweet from the database '%d, %s'" % (e.args[0], e.args[1])
         sys.exit(1)
@@ -129,9 +161,40 @@ def rehash_tweet (tweet):
 # right now =)
 #
 def main(argv):
+    global options
+
     no_tweets = -1
     cur_tweet = 0
-    print "The Magic Tweeter app, Version 0.001"
+    first = 1
+
+    parser = OptionParser()
+
+	# Option for setting an initial wait
+    parser.add_option("-w", "--wait", action="store_true",
+                  help="Do an initial random wait period before starting tweeting.", 
+                  dest="wait", default=False)
+
+	# Debug option
+    parser.add_option("-d", "--debug", action="store_true",
+                  help="Run in debug mode, no real tweets and quick timing.", 
+                  dest="debug", default=False)
+
+	# Username option
+    parser.add_option("-u", "--user", type="string",
+                  help="Enter a username for the MySQL database.", 
+                  dest="username", default="pontus")
+
+	# Password option
+    parser.add_option("-p", "--password", type="string",
+                  help="Enter a password for the MySQL database.", 
+                  dest="password", default="cecilia")
+
+    options, arguments = parser.parse_args()
+
+    mdb_user = options.username
+    mdb_pass = options.password
+    
+    print "The Magic Tweeter app, Version 0.002"
 
     try:
         con = database_connect()
@@ -150,13 +213,18 @@ def main(argv):
     auth.set_access_token(accessToken, accessSecret)
     api = tweepy.API(auth)
 
-    #
-    # Get timer values from the database
-    minTime, maxTime = get_timer_settings()
-
     print "Twitter User %s\n" % api.me().name
 
     while 1:
+        if first == 1 and options.wait == True:
+            # A defensive no spam friendly wait in case we sent out a tweet very close
+            # in time to restarting the application.
+            minTime, maxTime = get_timer_settings()
+            random_time = randint (minTime, maxTime)
+            print "Waiting %d seconds before sending the first tweet" % (random_time)
+            time.sleep(random_time)
+            first = 0
+
         # Make sure that the current tweet number still is within
         # the total number of tweets in the database
         if no_tweets != get_no_tweets():
@@ -169,18 +237,31 @@ def main(argv):
 
         # Get the next tweet and process it.
         tweet_msg = rehash_tweet(get_tweet (cur_tweet))
-        print "Tweeting message: '%s'" % tweet_msg
 
         try:
-            api.update_status(tweet_msg)
+            print "Tweeting message: '%s'" % tweet_msg
+            if options.debug == False:
+	            api.update_status(tweet_msg)
+            else:
+                print "Psst, did not really tweet that"
         except TweepError, e:
             print "An Error while trying to tweet a message, %s" % (e.reason[1])
             print "I will ignore this and continue with the next message in the queue"
 
         cur_tweet += 1
 	
+        #
+        # Get timer values from the database
+        if options.debug == False:
+            minTime, maxTime = get_timer_settings()
+        else:
+            # When debugging it's quite usefull to see what happens quickly
+            minTime = 10
+            maxTime = 20
+
         # Get a random number to create an appropriate wait time
         random_time = randint (minTime, maxTime)
+        print "Waiting %d seconds before sending the next tweet" % (random_time)
         time.sleep(random_time)
 
 #
